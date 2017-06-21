@@ -94,7 +94,7 @@ module Kitchen
         if config[:floating_ip]
           attach_ip(server, config[:floating_ip])
         elsif config[:floating_ip_pool]
-          attach_ip_from_pool(server, config[:floating_ip_pool])
+          attach_ip_from_pool(server, config[:floating_ip_pool], state)
         end
         state[:hostname] = get_ip(server)
         setup_ssh(server, state)
@@ -109,7 +109,17 @@ module Kitchen
 
         config[:disable_ssl_validation] && disable_ssl_validation
         server = compute.servers.get(state[:server_id])
-        server.destroy unless server.nil?
+        unless server.nil?
+          if config[:floating_ip_pool] && config[:allocate_floating_ip]
+            unless state[:floating_ip_id].nil?
+              floating_ip_id = state[:floating_ip_id]
+              info "Deleting floating IP with id #{floating_ip_id}>"
+              compute.release_address(floating_ip_id)
+              info "OpenStack Floating IP <#{floating_ip_id}> released."
+            end
+          end
+          server.destroy
+        end
         info "OpenStack instance <#{state[:server_id]}> destroyed."
         state.delete(:server_id)
         state.delete(:hostname)
@@ -282,17 +292,25 @@ module Kitchen
         end
       end
 
-      def attach_ip_from_pool(server, pool)
+      def attach_ip_from_pool(server, pool, state)
         @@ip_pool_lock.synchronize do
           info "Attaching floating IP from <#{pool}> pool"
-          free_addrs = compute.addresses.map do |i|
-            i.ip if i.fixed_ip.nil? && i.instance_id.nil? && i.pool == pool
-          end.compact
-          if free_addrs.empty?
-            fail ActionFailed, "No available IPs in pool <#{pool}>"
+          if config[:allocate_floating_ip]
+            resp = compute.allocate_address(pool)
+            ip = resp.body['floating_ip']['ip']
+            state[:floating_ip_id] = resp.body['floating_ip']['id']
+            info "Created floating IP <#{ip}> from <#{pool}> pool"
+            config[:floating_ip] = ip
+          else
+            free_addrs = compute.addresses.map do |i|
+              i.ip if i.fixed_ip.nil? && i.instance_id.nil? && i.pool == pool
+            end.compact
+            if free_addrs.empty?
+              fail ActionFailed, "No available IPs in pool <#{pool}>"
+            end
+            config[:floating_ip] = free_addrs[0]
           end
-          config[:floating_ip] = free_addrs[0]
-          attach_ip(server, free_addrs[0])
+          attach_ip(server, config[:floating_ip])
         end
       end
 
